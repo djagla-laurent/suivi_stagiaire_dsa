@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Espace administrateur</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="page">
+
+    <!-- Connexion -->
+    <section id="vue-connexion" class="narrow" style="max-width:420px;margin:40px auto;">
+      <h1>Espace administrateur</h1>
+      <form id="form-connexion" class="card">
+        <label>Adresse e-mail
+          <input id="email" type="email" required autocomplete="username">
+        </label>
+        <label>Mot de passe
+          <input id="mdp" type="password" required autocomplete="current-password">
+        </label>
+        <button type="submit" id="btn-connexion" class="principal">Se connecter</button>
+        <p id="msg-connexion" class="message" role="status"></p>
+      </form>
+      <p class="lien"><a href="index.html">Retour à la saisie</a></p>
+    </section>
+
+    <!-- Tableau de bord -->
+    <section id="vue-admin" hidden>
+      <div class="entete">
+        <h1>Stagiaires enregistrés</h1>
+        <div>
+          <a href="index.html" style="margin-right:12px;">Page de saisie</a>
+          <button id="btn-deconnexion">Se déconnecter</button>
+        </div>
+      </div>
+
+      <div class="outils">
+        <label>Recherche
+          <input id="recherche" type="search" placeholder="Nom, prénoms, type">
+        </label>
+        <label>Du
+          <input id="date-debut" type="date">
+        </label>
+        <label>Au
+          <input id="date-fin" type="date">
+        </label>
+        <button id="btn-effacer">Effacer les filtres</button>
+        <button id="btn-actualiser">Actualiser</button>
+        <button id="btn-export" class="principal">Exporter vers Excel (CSV)</button>
+      </div>
+
+      <p id="compteur" class="compteur"></p>
+      <div class="tableau">
+        <table>
+          <thead>
+            <tr>
+              <th>Date</th><th>Nom</th><th>Prénoms</th><th>Type de stage</th>
+              <th>Arrivée</th><th>Sortie</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="corps"></tbody>
+        </table>
+        <p id="vide" class="vide" hidden>Aucun stagiaire ne correspond à ces critères.</p>
+      </div>
+      <p id="msg-admin" class="message" role="status"></p>
+    </section>
+  </main>
+
+  <!-- Fenêtre de modification -->
+  <dialog id="dialogue">
+    <h2>Modifier l'enregistrement</h2>
+    <form id="form-edition">
+      <label>Nom <input id="e-nom" required maxlength="100"></label>
+      <label>Prénoms <input id="e-prenoms" required maxlength="100"></label>
+      <label>Type de stage <input id="e-type" required maxlength="100"></label>
+      <label>Date <input id="e-date" type="date" required></label>
+      <label>Heure d'arrivée <input id="e-arrivee" type="time" required></label>
+      <label>Heure de sortie <input id="e-sortie" type="time"></label>
+      <div class="boutons">
+        <button type="button" id="e-annuler">Annuler</button>
+        <button type="submit" class="principal">Enregistrer les modifications</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+  <script src="config.js"></script>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let donnees = [];
+    let idEdition = null;
+
+    const heure = (h) => (h ? h.slice(0, 5) : "");
+    const dateFr = (d) => (d ? d.split("-").reverse().join("/") : "");
+
+    function dire(id, texte, classe) {
+      $(id).textContent = texte;
+      $(id).className = "message " + (classe || "");
+    }
+
+    /* ---------- Connexion ---------- */
+    async function afficherSelonSession() {
+      const { data } = await db.auth.getSession();
+      let connecte = !!data.session;
+      if (connecte) {
+        const { data: estAdmin } = await db.rpc("est_admin");
+        if (estAdmin !== true) {
+          await db.auth.signOut();
+          connecte = false;
+          dire("msg-connexion", "Ce compte n'a pas accès à l'espace administrateur.", "erreur");
+        }
+      }
+      $("vue-connexion").hidden = connecte;
+      $("vue-admin").hidden = !connecte;
+      if (connecte) charger();
+    }
+
+    $("form-connexion").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      $("btn-connexion").disabled = true;
+      dire("msg-connexion", "");
+      const { error } = await db.auth.signInWithPassword({
+        email: $("email").value.trim(),
+        password: $("mdp").value
+      });
+      $("btn-connexion").disabled = false;
+      if (error) {
+        dire("msg-connexion", "Adresse e-mail ou mot de passe incorrect.", "erreur");
+        return;
+      }
+      $("mdp").value = "";
+      afficherSelonSession();
+    });
+
+    $("btn-deconnexion").addEventListener("click", async () => {
+      await db.auth.signOut();
+      donnees = [];
+      afficherSelonSession();
+    });
+
+    /* ---------- Données ---------- */
+    async function charger() {
+      dire("msg-admin", "");
+      const { data, error } = await db
+        .from("stagiaires")
+        .select("*")
+        .order("date_jour", { ascending: false })
+        .order("heure_arrivee", { ascending: false });
+      if (error) {
+        dire("msg-admin", "Impossible de charger les données. Vérifiez la connexion et vos droits.", "erreur");
+        console.error(error);
+        return;
+      }
+      donnees = data;
+      afficherTableau();
+    }
+
+    function lignesFiltrees() {
+      const q = $("recherche").value.trim().toLowerCase();
+      const debut = $("date-debut").value;
+      const fin = $("date-fin").value;
+      return donnees.filter((s) => {
+        if (debut && s.date_jour < debut) return false;
+        if (fin && s.date_jour > fin) return false;
+        if (!q) return true;
+        return [s.nom, s.prenoms, s.type_stage].join(" ").toLowerCase().includes(q);
+      });
+    }
+
+    function cellule(tr, texte) {
+      const td = document.createElement("td");
+      td.textContent = texte;
+      tr.appendChild(td);
+    }
+
+    function afficherTableau() {
+      const lignes = lignesFiltrees();
+      const corps = $("corps");
+      corps.replaceChildren();
+
+      lignes.forEach((s) => {
+        const tr = document.createElement("tr");
+        cellule(tr, dateFr(s.date_jour));
+        cellule(tr, s.nom);
+        cellule(tr, s.prenoms);
+        cellule(tr, s.type_stage);
+        cellule(tr, heure(s.heure_arrivee));
+        cellule(tr, heure(s.heure_sortie));
+
+        const td = document.createElement("td");
+        td.className = "actions";
+        const modif = document.createElement("button");
+        modif.textContent = "Modifier";
+        modif.addEventListener("click", () => ouvrirEdition(s));
+        const suppr = document.createElement("button");
+        suppr.textContent = "Supprimer";
+        suppr.className = "danger";
+        suppr.addEventListener("click", () => supprimer(s));
+        td.append(modif, suppr);
+        tr.appendChild(td);
+        corps.appendChild(tr);
+      });
+
+      $("vide").hidden = lignes.length > 0;
+      $("compteur").textContent =
+        lignes.length + " enregistrement(s) affiché(s) sur " + donnees.length;
+    }
+
+    ["recherche", "date-debut", "date-fin"].forEach((id) =>
+      $(id).addEventListener("input", afficherTableau)
+    );
+    $("btn-effacer").addEventListener("click", () => {
+      $("recherche").value = "";
+      $("date-debut").value = "";
+      $("date-fin").value = "";
+      afficherTableau();
+    });
+    $("btn-actualiser").addEventListener("click", charger);
+
+    /* ---------- Modification ---------- */
+    function ouvrirEdition(s) {
+      idEdition = s.id;
+      $("e-nom").value = s.nom;
+      $("e-prenoms").value = s.prenoms;
+      $("e-type").value = s.type_stage;
+      $("e-date").value = s.date_jour;
+      $("e-arrivee").value = heure(s.heure_arrivee);
+      $("e-sortie").value = heure(s.heure_sortie);
+      $("dialogue").showModal();
+    }
+
+    $("e-annuler").addEventListener("click", () => $("dialogue").close());
+
+    $("form-edition").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const { error } = await db.from("stagiaires").update({
+        nom: $("e-nom").value.trim(),
+        prenoms: $("e-prenoms").value.trim(),
+        type_stage: $("e-type").value.trim(),
+        date_jour: $("e-date").value,
+        heure_arrivee: $("e-arrivee").value,
+        heure_sortie: $("e-sortie").value || null
+      }).eq("id", idEdition);
+      $("dialogue").close();
+      if (error) {
+        dire("msg-admin", "La modification a échoué.", "erreur");
+        console.error(error);
+        return;
+      }
+      dire("msg-admin", "Modification enregistrée.", "ok");
+      charger();
+    });
+
+    /* ---------- Suppression ---------- */
+    async function supprimer(s) {
+      if (!confirm("Supprimer l'enregistrement de " + s.nom + " " + s.prenoms + " ?")) return;
+      const { error } = await db.from("stagiaires").delete().eq("id", s.id);
+      if (error) {
+        dire("msg-admin", "La suppression a échoué.", "erreur");
+        console.error(error);
+        return;
+      }
+      dire("msg-admin", "Enregistrement supprimé.", "ok");
+      charger();
+    }
+
+    /* ---------- Export CSV (ouvre dans Excel) ---------- */
+    const csv = (v) => '"' + String(v ?? "").replace(/"/g, '""') + '"';
+
+    $("btn-export").addEventListener("click", () => {
+      const lignes = lignesFiltrees();
+      const entete = ["Date", "Nom", "Prénoms", "Type de stage", "Arrivée", "Sortie"];
+      const rows = lignes.map((s) =>
+        [dateFr(s.date_jour), s.nom, s.prenoms, s.type_stage, heure(s.heure_arrivee), heure(s.heure_sortie)]
+          .map(csv).join(";")
+      );
+      const contenu = "\ufeff" + [entete.map(csv).join(";"), ...rows].join("\r\n");
+      const blob = new Blob([contenu], { type: "text/csv;charset=utf-8" });
+      const lien = document.createElement("a");
+      lien.href = URL.createObjectURL(blob);
+      lien.download = "stagiaires_" + new Date().toLocaleDateString("en-CA") + ".csv";
+      lien.click();
+      URL.revokeObjectURL(lien.href);
+    });
+
+    // Actualisation automatique toutes les 60 secondes
+    setInterval(() => { if (!$("vue-admin").hidden && !$("dialogue").open) charger(); }, 60000);
+
+    afficherSelonSession();
+  </script>
+</body>
+</html>

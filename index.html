@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Enregistrement des stagiaires</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="page narrow">
+
+    <!-- Connexion -->
+    <section id="vue-connexion">
+      <h1>Enregistrement des stagiaires</h1>
+      <form id="form-connexion" class="card">
+        <label>Adresse e-mail
+          <input id="email" type="email" required autocomplete="username">
+        </label>
+        <label>Mot de passe
+          <input id="mdp" type="password" required autocomplete="current-password">
+        </label>
+        <button type="submit" id="btn-connexion" class="principal">Se connecter</button>
+        <p id="msg-connexion" class="message" role="status"></p>
+      </form>
+    </section>
+
+    <!-- Saisie -->
+    <section id="vue-saisie" hidden>
+      <div class="barre">
+        <h1>Nouveau stagiaire</h1>
+        <button id="btn-deconnexion">Se déconnecter</button>
+      </div>
+
+      <form id="form" class="card" autocomplete="off">
+        <label>Nom
+          <input id="nom" required maxlength="100">
+        </label>
+        <label>Prénoms
+          <input id="prenoms" required maxlength="100">
+        </label>
+        <label>Type de stage
+          <input id="type" list="types" required maxlength="100">
+          <datalist id="types">
+            <option value="Académique">
+            <option value="Professionnel">
+            <option value="Observation">
+            <option value="Perfectionnement">
+          </datalist>
+        </label>
+        <label>Date
+          <input id="date" type="date" required>
+        </label>
+        <div class="ligne">
+          <label>Heure d'arrivée
+            <input id="arrivee" type="time" required>
+          </label>
+          <button type="button" id="maint-arrivee">Maintenant</button>
+        </div>
+        <div class="ligne">
+          <label>Heure de sortie
+            <input id="sortie" type="time">
+          </label>
+          <button type="button" id="maint-sortie">Maintenant</button>
+        </div>
+        <button type="submit" id="envoyer" class="principal">Enregistrer</button>
+        <p id="message" class="message" role="status"></p>
+      </form>
+
+      <h2 style="margin-top:28px;">Enregistrés aujourd'hui</h2>
+      <div class="tableau compact">
+        <table>
+          <thead>
+            <tr><th>Stagiaire</th><th>Arrivée</th><th>Sortie</th></tr>
+          </thead>
+          <tbody id="corps"></tbody>
+        </table>
+        <p id="vide" class="vide" hidden>Aucun stagiaire enregistré aujourd'hui.</p>
+      </div>
+    </section>
+
+    <p class="lien"><a href="admin.html">Espace administrateur</a></p>
+  </main>
+
+  <script src="supabase.min.js"></script>
+  <script src="config.js"></script>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const aujourdhui = () => new Date().toLocaleDateString("en-CA"); // AAAA-MM-JJ
+    const maintenant = () => new Date().toTimeString().slice(0, 5);   // HH:MM
+    const heure = (h) => (h ? h.slice(0, 5) : "");
+
+    function dire(id, texte, classe) {
+      $(id).textContent = texte;
+      $(id).className = "message " + (classe || "");
+    }
+
+    function reinitialiser() {
+      $("form").reset();
+      $("date").value = aujourdhui();
+    }
+
+    /* ---------- Connexion ---------- */
+    async function afficherSelonSession() {
+      const { data } = await db.auth.getSession();
+      const connecte = !!data.session;
+      $("vue-connexion").hidden = connecte;
+      $("vue-saisie").hidden = !connecte;
+      if (connecte) {
+        reinitialiser();
+        chargerDuJour();
+      }
+    }
+
+    $("form-connexion").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      $("btn-connexion").disabled = true;
+      dire("msg-connexion", "");
+      const { error } = await db.auth.signInWithPassword({
+        email: $("email").value.trim(),
+        password: $("mdp").value
+      });
+      $("btn-connexion").disabled = false;
+      if (error) {
+        console.error(error);
+        const texte = /invalid login credentials/i.test(error.message)
+          ? "Adresse e-mail ou mot de passe incorrect."
+          : "Connexion impossible : " + error.message;
+        dire("msg-connexion", texte, "erreur");
+        return;
+      }
+      $("mdp").value = "";
+      afficherSelonSession();
+    });
+
+    $("btn-deconnexion").addEventListener("click", async () => {
+      await db.auth.signOut();
+      afficherSelonSession();
+    });
+
+    /* ---------- Saisie ---------- */
+    $("maint-arrivee").addEventListener("click", () => { $("arrivee").value = maintenant(); });
+    $("maint-sortie").addEventListener("click", () => { $("sortie").value = maintenant(); });
+
+    $("form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      dire("message", "");
+      $("envoyer").disabled = true;
+
+      const { error } = await db.from("stagiaires").insert({
+        nom: $("nom").value.trim(),
+        prenoms: $("prenoms").value.trim(),
+        type_stage: $("type").value.trim(),
+        date_jour: $("date").value,
+        heure_arrivee: $("arrivee").value,
+        heure_sortie: $("sortie").value || null
+      });
+
+      $("envoyer").disabled = false;
+      if (error) {
+        dire("message", "L'enregistrement a échoué. Vérifiez la connexion, ou reconnectez-vous.", "erreur");
+        console.error(error);
+        return;
+      }
+      dire("message", "Stagiaire enregistré.", "ok");
+      reinitialiser();
+      chargerDuJour();
+    });
+
+    /* ---------- Enregistrés aujourd'hui + sortie ---------- */
+    async function chargerDuJour() {
+      const { data, error } = await db
+        .from("stagiaires")
+        .select("id, nom, prenoms, heure_arrivee, heure_sortie")
+        .eq("date_jour", aujourdhui())
+        .order("heure_arrivee", { ascending: false });
+      if (error) {
+        console.error(error);
+        return;
+      }
+      const corps = $("corps");
+      corps.replaceChildren();
+      data.forEach((s) => {
+        const tr = document.createElement("tr");
+        const tdNom = document.createElement("td");
+        tdNom.textContent = s.nom + " " + s.prenoms;
+        const tdArr = document.createElement("td");
+        tdArr.textContent = heure(s.heure_arrivee);
+        const tdSor = document.createElement("td");
+        if (s.heure_sortie) {
+          tdSor.textContent = heure(s.heure_sortie);
+        } else {
+          const b = document.createElement("button");
+          b.textContent = "Enregistrer la sortie";
+          b.addEventListener("click", () => enregistrerSortie(s.id, b));
+          tdSor.appendChild(b);
+        }
+        tr.append(tdNom, tdArr, tdSor);
+        corps.appendChild(tr);
+      });
+      $("vide").hidden = data.length > 0;
+    }
+
+    async function enregistrerSortie(id, bouton) {
+      bouton.disabled = true;
+      const { error } = await db.from("stagiaires")
+        .update({ heure_sortie: maintenant() })
+        .eq("id", id);
+      if (error) {
+        bouton.disabled = false;
+        dire("message", "L'heure de sortie n'a pas pu être enregistrée.", "erreur");
+        console.error(error);
+        return;
+      }
+      chargerDuJour();
+    }
+
+    afficherSelonSession();
+  </script>
+</body>
+</html>
